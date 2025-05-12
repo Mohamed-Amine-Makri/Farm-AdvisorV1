@@ -1,0 +1,32 @@
+# First ignore everything
+*
+
+# Don't ignore the gitignore file itself
+!.gitignore
+
+# Then allow these specific files
+!app.py
+!requirements.txt
+
+# Allow scripts folder and all its contents
+!scripts/
+!scripts/**
+
+# Allow src folder and its contents
+!src/
+!src/**
+
+# But ignore all __pycache__ directories anywhere
+**/__pycache__/
+**/*.pyc
+
+# Ignore these specific folders/files inside src (if you don't want them)
+src/.env
+src/*.log
+
+# Other common files to ignore
+.vscode/
+.env
+*.log
+.DS_Store
+Thumbs.db
