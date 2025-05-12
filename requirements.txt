@@ -1,0 +1,17 @@
+langgraph>=0.0.19
+langchain>=0.0.335
+langchain-community>=0.0.13
+langchain-ollama>=0.0.1
+langmem>=0.0.1
+sqlalchemy>=2.0.23
+psycopg2-binary>=2.9.9
+pydantic>=2.4.2
+fastapi>=0.104.1
+uvicorn>=0.24.0
+python-dotenv>=1.0.0
+numpy>=1.26.1
+aiohttp>=3.9.1
+jinja2>=3.1.2
+pydantic-settings>=2.0.3
+streamlit>=1.27.2
+agentevals>=0.0.1
