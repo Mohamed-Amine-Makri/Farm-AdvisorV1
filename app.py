@@ -2,12 +2,15 @@ import os
 import time
 import sys
 import uuid
+import json
 from colorama import Fore, Style, init
-from src.graph.multi_agent_graph import create_multi_agent_graph, create_simple_graph
+from src.graph.multi_agent_graph import run_farm_advisor
 from src.database.models import init_db
 from src.config.model_config import OLLAMA_BASE_URL, OLLAMA_MODEL
 from src.utils.ollama_utils import check_ollama_availability
+from langchain_core.messages import AIMessage, HumanMessage
 import logging
+import threading
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -15,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 # Initialize colorama for cross-platform colored terminal output
 init()
+
+# After other logging setup, redirect log output to a file
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+file_handler = logging.FileHandler(os.path.join(log_dir, "farm_advisor.log"))
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(file_handler)
+logging.getLogger().setLevel(logging.INFO)
 
 def print_colored(text, color=Fore.WHITE, end="\n"):
     """Print text with specified color"""
@@ -35,206 +46,164 @@ def print_banner():
     print_colored("Welcome! Ask me anything about farming in Tunisia or describe your farm for personalized recommendations and planning.", Fore.CYAN)
     print_colored("Type 'exit' to quit.\n", Fore.YELLOW)
 
-def direct_chat_mode():
-    """
-    Fallback mode that directly uses Ollama API without the graph
-    when other methods aren't available
-    """
-    from src.utils.ollama_utils import get_ollama_chat_completion
-    from src.config.model_config import COMBINED_PROMPT
-    
-    print_colored("Running in direct chat mode (minimal functionality)...", Fore.YELLOW)
-    messages = [{"role": "system", "content": COMBINED_PROMPT}]
-    
-    # Add initial greeting to conversation
-    assistant_greeting = "Hello! I'm your Tunisian Farm Advisor. I can help with agricultural questions, provide crop recommendations, or create farming plans. How can I assist you today?"
-    print_colored("Assistant: ", Fore.BLUE, end="")
-    print_colored(assistant_greeting, Fore.BLUE)
-    print()
-    
-    messages.append({"role": "assistant", "content": assistant_greeting})
-    
-    # Main interaction loop
-    while True:
-        # Get user input
-        user_input = input(f"{Fore.GREEN}You: {Style.RESET_ALL}")
+def show_thinking_animation(stop_event):
+    """Display a "thinking" animation while the model is processing"""
+    dots = 0
+    while not stop_event.is_set():
+        dots = (dots % 3) + 1
+        print_colored(f"\rThinking{'.' * dots}{' ' * (3 - dots)}", Fore.YELLOW, end="")
+        time.sleep(0.5)
+    # Clear the line when done
+    print_colored("\r" + " " * 20 + "\r", end="")
+
+def extract_ai_message(messages):
+    """Extract the last AI message from the messages list"""
+    if not messages:
+        return "No response generated."
         
-        # Check for exit command
-        if user_input.lower() in ["exit", "quit", "bye"]:
-            print_colored("Thank you for using the Tunisian Farm Advisor. Goodbye!", Fore.CYAN)
-            break
-        
-        # Add user message to conversation history
-        messages.append({"role": "user", "content": user_input})
-        
-        # Prepare to show assistant's response
-        print_colored("Assistant: ", Fore.BLUE, end="")
-        
-        try:
-            # Get direct chat completion
-            response = get_ollama_chat_completion(messages)
+    # Debug message types
+    logger.debug(f"Message types: {[type(m).__name__ for m in messages]}")
+    
+    # Try different extraction methods
+    for msg in reversed(messages):
+        # Handle LangChain AIMessage
+        if isinstance(msg, AIMessage):
+            return msg.content
             
-            # Print response and add to messages
-            print_colored(response, Fore.BLUE)
-            messages.append({"role": "assistant", "content": response})
+        # Check for type attribute (LangChain structure)
+        if hasattr(msg, "type") and msg.type == "ai":
+            return msg.content
             
-        except Exception as e:
-            logger.exception("Error in direct chat mode")
-            error_msg = f"I'm sorry, I encountered an error: {str(e)}"
-            print_colored(error_msg, Fore.RED)
-            # Don't add error to message history
-        
-        print()  # Extra line for readability
+        # Check for role attribute (OpenAI format)
+        if hasattr(msg, "role") and msg.role == "assistant":
+            return msg.content
+            
+        # Check dictionary format (various APIs)
+        if isinstance(msg, dict):
+            if msg.get("role") == "assistant":
+                return msg.get("content", "")
+            if msg.get("type") == "ai":
+                return msg.get("content", "")
+    
+    # If no AI message is found, return a default message with recommendations if available
+    if any(msg for msg in messages if hasattr(msg, "content")):
+        # Get the last message with content as fallback
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and msg.content:
+                return msg.content
+                
+    return "No response generated."
 
 def main():
-    """Main application entry point"""
+    """Main entry point for the Farm Advisor application"""
     print_banner()
     
-    # Initialize the database
-    print_colored("Initializing database...", Fore.CYAN)
-    init_db()
+    # Check if Ollama is available
+    print_colored("Checking Ollama availability...", Fore.YELLOW)
+    if not check_ollama_availability():
+        print_colored(f"Error: Cannot connect to Ollama at {OLLAMA_BASE_URL} or model {OLLAMA_MODEL} is not available.", Fore.RED)
+        print_colored("Please ensure Ollama is running and the model is installed.", Fore.RED)
+        return 1
     
-    # Check Ollama availability
-    print_colored("Checking Ollama availability...", Fore.CYAN)
-    ollama_ready = check_ollama_availability()
+    print_colored(f"✓ Connected to Ollama with model {OLLAMA_MODEL}", Fore.GREEN)
     
-    if not ollama_ready:
-        print_colored("Warning: Ollama is not responding correctly. Trying direct mode...", Fore.YELLOW)
-        direct_chat_mode()
-        return
-    
-    # Create the agent system
-    print_colored("Initializing AI Farm Advisor...", Fore.CYAN)
+    # Initialize database if needed
     try:
-        agent_system = create_multi_agent_graph()
+        init_db()
+        print_colored("✓ Database initialized", Fore.GREEN)
     except Exception as e:
-        print_colored(f"Error initializing agent system: {str(e)}", Fore.RED)
-        print_colored("Falling back to direct chat mode...", Fore.YELLOW)
-        direct_chat_mode()
-        return
+        logger.warning(f"Database initialization failed: {str(e)}")
+        print_colored(f"Note: Database initialization skipped - {str(e)}", Fore.YELLOW)
     
-    # Initialize conversation with UUID
-    thread_id = str(uuid.uuid4())
-    messages = []
+    print_colored("\nFarm Advisor is ready! How can I help with your farming needs today?", Fore.CYAN)
     
-    # Print initial greeting
-    print_colored("Assistant: ", Fore.BLUE, end="")
-    print_colored("Hello! I'm your Tunisian Farm Advisor. I can help with agricultural questions, provide crop recommendations, or create farming plans. How can I assist you today?", Fore.BLUE)
-    print()
+    # Session management
+    session_id = None
     
-    # Add initial greeting to conversation
-    messages.append({
-        "role": "assistant",
-        "content": "Hello! I'm your Tunisian Farm Advisor. I can help with agricultural questions, provide crop recommendations, or create farming plans. How can I assist you today?"
-    })
-    
-    # Main interaction loop
+    # Main conversation loop
     while True:
-        # Get user input
-        user_input = input(f"{Fore.GREEN}You: {Style.RESET_ALL}")
-        
-        # Check for exit command
-        if user_input.lower() in ["exit", "quit", "bye"]:
-            print_colored("Thank you for using the Tunisian Farm Advisor. Goodbye!", Fore.CYAN)
-            break
-        
-        # Add user message to conversation history
-        messages.append({"role": "user", "content": user_input})
-        
-        # Prepare to show assistant's response
-        print_colored("Assistant: ", Fore.BLUE, end="")
-        
-        # Configure the agent system with thread_id and checkpoint_id
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_id": thread_id
-            }
-        }
-        
-        # Track response content
-        collecting_response = ""
-        
         try:
-            # Stream the agent system's response with more robust error handling
-            for chunk in agent_system.stream(
-                {"messages": messages},
-                config=config,
-                stream_mode="updates"
-            ):
-                # Handle different types of chunks
-                if isinstance(chunk, str):
-                    # If plain string, print directly
-                    print_colored(chunk, Fore.BLUE, end="")
-                    collecting_response += chunk
-                    
-                elif isinstance(chunk, dict):
-                    # For updates and messages
-                    if "messages" in chunk:
-                        all_msgs = chunk.get("messages", [])
-                        assistant_msgs = []
-                        
-                        # Handle various message formats
-                        for msg in all_msgs:
-                            if isinstance(msg, dict) and msg.get("role") == "assistant" and "content" in msg:
-                                assistant_msgs.append(msg)
-                            elif hasattr(msg, "type") and msg.type == "assistant" and hasattr(msg, "content"):
-                                assistant_msgs.append({"role": "assistant", "content": msg.content})
-                            elif hasattr(msg, "role") and msg.role == "assistant" and hasattr(msg, "content"):
-                                assistant_msgs.append({"role": "assistant", "content": msg.content})
-                        
-                        if assistant_msgs:
-                            latest_msg = assistant_msgs[-1]
-                            content = latest_msg.get("content", "")
-                            if content and not collecting_response:
-                                print_colored(content, Fore.BLUE, end="")
-                                collecting_response = content
-                    
-                    # Extract thread_id for persistence
-                    if "thread_id" in chunk and chunk["thread_id"]:
-                        thread_id = chunk["thread_id"]
-                    
-                    # Extract response content from various possible formats
-                    if not collecting_response:
-                        if "content" in chunk:
-                            print_colored(chunk["content"], Fore.BLUE, end="")
-                            collecting_response = chunk["content"]
-                        elif "response" in chunk:
-                            print_colored(chunk["response"], Fore.BLUE, end="")
-                            collecting_response = chunk["response"]
+            # Get user input
+            print_colored("\nYou: ", Fore.GREEN, end="")
+            user_input = input().strip()
+            
+            # Check for exit command
+            if user_input.lower() in ["exit", "quit", "bye"]:
+                print_colored("\nThank you for using Farm Advisor. Goodbye!", Fore.CYAN)
+                break
+            
+            if not user_input:  # Skip empty inputs
+                continue
                 
-                time.sleep(0.01)  # Small delay for more natural output pacing
+            # Create and start the thinking animation
+            stop_animation = threading.Event()
+            animation_thread = threading.Thread(target=show_thinking_animation, args=(stop_animation,))
+            animation_thread.daemon = True
+            animation_thread.start()
             
-            print()  # End the line after streaming completes
+            try:
+                # Process the input through our multi-agent system
+                start_time = time.time()
+                result = run_farm_advisor(user_input, session_id)
+                
+                # Save the session ID for next interaction
+                session_id = result.get("session_id", session_id)
+                
+                # Calculate response time
+                response_time = time.time() - start_time
+                
+            except Exception as e:
+                # Stop the animation before raising the exception
+                stop_animation.set()
+                animation_thread.join(timeout=1.0)
+                logger.error(f"Error processing input: {str(e)}", exc_info=True)
+                print_colored(f"\nSorry, an error occurred: {str(e)}", Fore.RED)
+                continue
+            finally:
+                # Ensure animation stops
+                stop_animation.set()
+                animation_thread.join(timeout=1.0)
             
-            # Add the final response to messages if we got meaningful content
-            if collecting_response:
-                # Check if this content is already in messages
-                if not any(
-                    (isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content") == collecting_response)
-                    for msg in messages
-                ):
-                    messages.append({
-                        "role": "assistant", 
-                        "content": collecting_response
-                    })
+            # Extract and display the response
+            ai_response = extract_ai_message(result.get("messages", []))
             
+            print_colored("\nFarm Advisor: ", Fore.BLUE)
+            print_colored(ai_response, Fore.WHITE)
+            print_colored(f"\n(Response time: {response_time:.2f}s)", Fore.CYAN)
+            
+            # Display recommendations if available
+            # if result.get("recommendations") and len(result.get("recommendations", [])) > 0:
+            #     print_colored("\nKey Recommendations:", Fore.MAGENTA)
+            #     for i, rec in enumerate(result["recommendations"][:5], 1):  # Show top 5 recommendations
+            #         print_colored(f"  {i}. {rec}", Fore.CYAN)
+            
+            # If in debug mode, show extracted or planning data
+            if os.environ.get("DEBUG_MODE") == "1":
+                if result.get("extracted_data"):
+                    print_colored("\n[DEBUG] Extracted Data:", Fore.YELLOW)
+                    print_colored(json.dumps(result["extracted_data"], indent=2), Fore.WHITE)
+                
+                if result.get("planning_data"):
+                    print_colored("\n[DEBUG] Planning Data:", Fore.YELLOW)
+                    print_colored(json.dumps(result["planning_data"], indent=2), Fore.WHITE)
+                    
+                print_colored(f"\n[DEBUG] Active Agent: {result.get('active_agent', 'unknown')}", Fore.YELLOW)
+
+        except KeyboardInterrupt:
+            print_colored("\nExiting Farm Advisor...", Fore.YELLOW)
+            break
         except Exception as e:
-            logger.exception("Error processing response")
-            print_colored(f"\nError: {str(e)}", Fore.RED)
-            # Add error message to conversation
-            error_msg = f"I'm sorry, I encountered an error: {str(e)}"
-            print_colored(error_msg, Fore.BLUE)
-            messages.append({"role": "assistant", "content": error_msg})
-            
-            # If we get timeout errors repeatedly, fall back to direct chat mode
-            if "timeout" in str(e).lower() or "connection" in str(e).lower():
-                retry = input(f"{Fore.YELLOW}Connection issues detected. Switch to direct chat mode? (y/n): {Style.RESET_ALL}")
-                if retry.lower() in ["y", "yes"]:
-                    direct_chat_mode()
-                    return
-        
-        print()  # Extra line for readability between interactions
+            logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+            print_colored(f"\nAn unexpected error occurred: {str(e)}", Fore.RED)
+            print_colored("The application will continue running.", Fore.YELLOW)
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print_colored("\nApplication terminated by user.", Fore.YELLOW)
+        sys.exit(0)
+    except Exception as e:
+        logger.critical(f"Fatal error: {str(e)}", exc_info=True)
+        print_colored(f"\nA fatal error occurred: {str(e)}", Fore.RED)
+        sys.exit(1)

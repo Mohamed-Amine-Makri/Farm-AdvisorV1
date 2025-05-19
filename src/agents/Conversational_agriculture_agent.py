@@ -1,6 +1,4 @@
-from langgraph.prebuilt import create_react_agent
 from langchain_ollama import ChatOllama
-from langgraph.checkpoint.memory import InMemorySaver
 from src.config.model_config import (
     OLLAMA_BASE_URL, 
     OLLAMA_MODEL, 
@@ -10,7 +8,7 @@ from src.config.model_config import (
 )
 
 def create_conversational_agent():
-    """Create the conversational agriculture agent"""
+    """Create the conversational agriculture agent without tools"""
     
     # Initialize the model
     model = ChatOllama(
@@ -20,15 +18,5 @@ def create_conversational_agent():
         max_tokens=MAX_TOKENS
     )
     
-    # Create a checkpointer for short-term memory
-    checkpointer = InMemorySaver()
-    
-    # Create the agent with an empty tools list (will be populated in multi_agent_graph.py)
-    conversational_agent = create_react_agent(
-        model=model,
-        tools=[],  # Add empty tools list here
-        prompt=CONVERSATIONAL_AGENT_PROMPT,
-        checkpointer=checkpointer,
-    )
-    
-    return conversational_agent
+    # Return the model directly
+    return model

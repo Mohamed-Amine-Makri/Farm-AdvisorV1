@@ -1,6 +1,4 @@
-from langgraph.prebuilt import create_react_agent
 from langchain_ollama import ChatOllama
-from langchain_core.tools import Tool
 from src.config.model_config import (
     OLLAMA_BASE_URL, 
     OLLAMA_MODEL, 
@@ -8,10 +6,9 @@ from src.config.model_config import (
     MAX_TOKENS, 
     SUPERVISOR_PROMPT
 )
-from typing import Dict, List, Any
 
-def create_supervisor_agent(tools: List[Dict[str, Any]]):
-    """Create the supervisor agent to coordinate other agents"""
+def create_supervisor_agent():
+    """Create the supervisor agent to coordinate other agents - without tools"""
     
     # Initialize the model
     model = ChatOllama(
@@ -21,18 +18,4 @@ def create_supervisor_agent(tools: List[Dict[str, Any]]):
         max_tokens=MAX_TOKENS
     )
     
-    # Create the agent
-    supervisor_agent = create_react_agent(
-        model=model,
-        tools=[
-            Tool.from_function(
-                func=lambda target_node: {"target": target_node},
-                name=tool["name"],
-                description=tool["description"]
-            )
-            for tool in tools
-        ],
-        prompt=SUPERVISOR_PROMPT,
-    )
-    
-    return supervisor_agent
+    return model  # Return the raw model instead of a React agent
